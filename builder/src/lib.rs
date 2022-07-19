@@ -3,6 +3,32 @@ use proc_macro2::{Ident, Span};
 use quote::quote;
 use syn::{parse_macro_input, DeriveInput, Type};
 
+enum ParsedType {
+    Option(Type),
+    Other(Type),
+}
+
+fn parse_type(ty: &Type) -> ParsedType {
+    if let Type::Path(t) = ty {
+        let segment_in_option = t.path.segments.first().and_then(|segment| {
+            if segment.ident == "Option" {
+                Some(segment)
+            } else {
+                None
+            }
+        });
+
+        if let Some(segment) = segment_in_option {
+            if let syn::PathArguments::AngleBracketed(t) = &segment.arguments {
+                if let Some(syn::GenericArgument::Type(ty)) = t.args.first() {
+                    return ParsedType::Option(ty.clone());
+                }
+            }
+        }
+    }
+    ParsedType::Other(ty.clone())
+}
+
 #[proc_macro_derive(Builder)]
 pub fn derive(input: TokenStream) -> TokenStream {
     let input = parse_macro_input!(input as DeriveInput);
@@ -18,28 +44,16 @@ pub fn derive(input: TokenStream) -> TokenStream {
         if let syn::Fields::Named(n) = s.fields {
             for field in n.named.iter() {
                 if let Some(field_ident) = field.ident.clone() {
-                    let mut is_option = false;
-                    if let Type::Path(t) = &field.ty {
-                        let result = t
-                            .path
-                            .segments
-                            .iter()
-                            .find(|segment| segment.ident == "Option");
-
-                        if let Some(segment) = result {
-                            if let syn::PathArguments::AngleBracketed(t) = &segment.arguments {
-                                if let Some(syn::GenericArgument::Type(ty)) = t.args.first() {
-                                    is_option = true;
-                                    optional_field_key.push(field_ident.clone());
-                                    optional_field_type.push(ty.clone());
-                                }
-                            }
+                    let parsed_type = parse_type(&field.ty);
+                    match parsed_type {
+                        ParsedType::Option(ty) => {
+                            optional_field_key.push(field_ident.clone());
+                            optional_field_type.push(ty.clone());
                         }
-                    }
-
-                    if !is_option {
-                        field_key.push(field_ident.clone());
-                        field_type.push(field.ty.clone());
+                        ParsedType::Other(ty) => {
+                            field_key.push(field_ident.clone());
+                            field_type.push(ty.clone());
+                        }
                     }
                 }
             }
