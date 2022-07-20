@@ -148,26 +148,26 @@ pub fn derive(input: TokenStream) -> TokenStream {
     let expanded = quote! {
         struct #builder_name {
             #(
-                #field_key: Option<#field_type>,
+                #field_key: std::option::Option<#field_type>,
             )*
             #(
-                #optional_field_key: Option<#optional_field_type>,
+                #optional_field_key: std::option::Option<#optional_field_type>,
             )*
             #(
-                #vec_field_key: Vec<#vec_field_type>,
+                #vec_field_key: std::vec::Vec<#vec_field_type>,
             )*
         }
 
         impl #builder_name {
             #(
                 fn #field_key(&mut self, #field_key: #field_type) -> &mut #builder_name {
-                    self.#field_key = Some(#field_key);
+                    self.#field_key = std::option::Option::Some(#field_key);
                     self
                 }
             )*
             #(
                 fn #optional_field_key(&mut self, #optional_field_key: #optional_field_type) -> &mut #builder_name {
-                    self.#optional_field_key = Some(#optional_field_key);
+                    self.#optional_field_key = std::option::Option::Some(#optional_field_key);
                     self
                 }
             )*
@@ -179,10 +179,10 @@ pub fn derive(input: TokenStream) -> TokenStream {
             )*
 
 
-            fn build(&mut self) -> Result<#name, Box<dyn std::error::Error>> {
+            fn build(&mut self) -> std::result::Result<#name, std::boxed::Box<dyn std::error::Error>> {
                 #(
                     if self.#field_key.is_none() {
-                        return Err(format!("{} is missing", stringify!(#field_key)).into());
+                        return std::result::Result::Err(format!("{} is missing", stringify!(#field_key)).into());
                     }
                 )*
                 Ok(#name {
