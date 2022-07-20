@@ -1,35 +1,93 @@
 use proc_macro::TokenStream;
 use proc_macro2::{Ident, Span};
 use quote::quote;
-use syn::{parse_macro_input, DeriveInput, Type};
+use syn::{parse::Parse, parse_macro_input, DeriveInput, Path, Type};
 
+#[derive(Debug)]
 enum ParsedType {
     Option(Type),
+    Vec(Type),
     Other(Type),
 }
 
-fn parse_type(ty: &Type) -> ParsedType {
-    if let Type::Path(t) = ty {
-        let segment_in_option = t.path.segments.first().and_then(|segment| {
-            if segment.ident == "Option" {
-                Some(segment)
-            } else {
-                None
-            }
-        });
+fn parse_path(path: &Path) -> Option<(&Ident, &Type)> {
+    let ident = path.segments.first().map(|segment| &segment.ident);
+    let mut inner_ty: Option<&Type> = None;
 
-        if let Some(segment) = segment_in_option {
-            if let syn::PathArguments::AngleBracketed(t) = &segment.arguments {
-                if let Some(syn::GenericArgument::Type(ty)) = t.args.first() {
-                    return ParsedType::Option(ty.clone());
+    let path_segment = path.segments.first();
+    println!("path segment: {:#?}", path_segment);
+    if let Some(syn::PathSegment {
+        arguments: syn::PathArguments::AngleBracketed(t),
+        ..
+    }) = path_segment
+    {
+        if let Some(syn::GenericArgument::Type(ty)) = t.args.first() {
+            inner_ty = Some(ty);
+        }
+    }
+    println!("parsed: {:#?}", (ident, inner_ty));
+
+    match (ident, inner_ty) {
+        (Some(ident), Some(inner_ty)) => Some((ident, inner_ty)),
+        _ => None,
+    }
+}
+
+fn parse_type(ty: &Type) -> ParsedType {
+    if let Type::Path(syn::TypePath { path, .. }) = ty {
+        if let Some((ident, ty)) = parse_path(path) {
+            match (ident.to_string().as_ref(), ty) {
+                ("Option", inner_ty) => {
+                    return ParsedType::Option(inner_ty.clone());
                 }
+                ("Vec", inner_ty) => {
+                    return ParsedType::Vec(inner_ty.clone());
+                }
+                _ => (),
             }
         }
     }
     ParsedType::Other(ty.clone())
 }
 
-#[proc_macro_derive(Builder)]
+#[derive(Debug)]
+enum ParsedAttribute {
+    Each(String),
+}
+
+fn parse_attribute(attr: &syn::Attribute) -> Result<ParsedAttribute, Box<dyn std::error::Error>> {
+    let meta = attr.parse_meta()?;
+    let ident = meta
+        .path()
+        .get_ident()
+        .and_then(|ident| Some(ident.to_string()))
+        .unwrap_or_default();
+    if ident != "builder" {
+        return Err("identifier is not builder".into());
+    }
+
+    if let syn::Meta::List(meta_list) = meta {
+        if let Some(nested_meta) = meta_list.nested.first() {
+            if let syn::NestedMeta::Meta(syn::Meta::NameValue(name_value)) = nested_meta {
+                let ident = name_value
+                    .path
+                    .get_ident()
+                    .map(|ident| ident.to_string())
+                    .unwrap_or_default();
+                if ident == "each" {
+                    if let syn::Lit::Str(lit_str) = &name_value.lit {
+                        let value = lit_str.value();
+                        return Ok(ParsedAttribute::Each(value));
+                    }
+                }
+            }
+        }
+    }
+
+    return Err("this is not builder".into());
+}
+
+#[proc_macro_derive(Builder, attributes(builder))]
 pub fn derive(input: TokenStream) -> TokenStream {
     let input = parse_macro_input!(input as DeriveInput);
     let name = input.ident;
@@ -40,19 +98,31 @@ pub fn derive(input: TokenStream) -> TokenStream {
     let mut optional_field_key: Vec<Ident> = vec![];
     let mut optional_field_type: Vec<Type> = vec![];
 
+    let mut vec_field_key: Vec<Ident> = vec![];
+    let mut vec_field_each_key: Vec<Ident> = vec![];
+    let mut vec_field_type: Vec<Type> = vec![];
+
     if let syn::Data::Struct(s) = input.data {
         if let syn::Fields::Named(n) = s.fields {
             for field in n.named.iter() {
                 if let Some(field_ident) = field.ident.clone() {
+                    let optional_parsed_attribute =
+                        field.attrs.iter().flat_map(parse_attribute).next();
+
                     let parsed_type = parse_type(&field.ty);
-                    match parsed_type {
-                        ParsedType::Option(ty) => {
+                    match (parsed_type, optional_parsed_attribute) {
+                        (ParsedType::Vec(inner_ty), Some(ParsedAttribute::Each(value))) => {
+                            vec_field_key.push(field_ident.clone());
+                            vec_field_each_key.push(Ident::new(value.as_ref(), Span::call_site()));
+                            vec_field_type.push(inner_ty.clone());
+                        }
+                        (ParsedType::Option(ty), _) => {
                             optional_field_key.push(field_ident.clone());
                             optional_field_type.push(ty.clone());
                         }
-                        ParsedType::Other(ty) => {
+                        (_, _) => {
                             field_key.push(field_ident.clone());
-                            field_type.push(ty.clone());
+                            field_type.push(field.ty.clone());
                         }
                     }
                 }
@@ -67,6 +137,9 @@ pub fn derive(input: TokenStream) -> TokenStream {
             )*
             #(
                 #optional_field_key: Option<#optional_field_type>,
+            )*
+            #(
+                #vec_field_key: Vec<#vec_field_type>,
             )*
         }
 
@@ -83,6 +156,13 @@ pub fn derive(input: TokenStream) -> TokenStream {
                     self
                 }
             )*
+            #(
+                fn #vec_field_each_key(&mut self, #vec_field_each_key: #vec_field_type) -> &mut #builder_name {
+                    self.#vec_field_key.push(#vec_field_each_key);
+                    self
+                }
+            )*
+
 
             fn build(&mut self) -> Result<#name, Box<dyn std::error::Error>> {
                 #(
@@ -93,6 +173,7 @@ pub fn derive(input: TokenStream) -> TokenStream {
                 Ok(#name {
                     #(#field_key: self.#field_key.clone().unwrap(),)*
                     #(#optional_field_key: self.#optional_field_key.clone(),)*
+                    #(#vec_field_key: self.#vec_field_key.clone(),)*
                 })
             }
         }
@@ -106,6 +187,10 @@ pub fn derive(input: TokenStream) -> TokenStream {
 
                     #(
                         #optional_field_key: None,
+                    )*
+
+                    #(
+                        #vec_field_key: vec![],
                     )*
                 }
             }

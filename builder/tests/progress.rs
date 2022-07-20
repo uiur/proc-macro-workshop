@@ -4,6 +4,7 @@ use derive_builder::Builder;
 pub struct Command {
     executable: String,
     args: Vec<String>,
+    #[builder(each = "env")]
     env: Vec<String>,
     current_dir: Option<String>,
 }
@@ -16,7 +17,7 @@ fn tests() {
     t.pass("tests/04-call-build.rs");
     t.pass("tests/05-method-chaining.rs");
     t.pass("tests/06-optional-field.rs");
-    //t.pass("tests/07-repeated-field.rs");
+    t.pass("tests/07-repeated-field.rs");
     //t.compile_fail("tests/08-unrecognized-attribute.rs");
     //t.pass("tests/09-redefined-prelude-types.rs");
 }
