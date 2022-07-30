@@ -1,6 +1,6 @@
 use proc_macro::TokenStream;
 use quote::quote;
-use syn::{parse_macro_input, Attribute, DeriveInput, Field};
+use syn::{parse_macro_input, parse_quote, Attribute, DeriveInput, Field, GenericParam, Generics};
 
 fn parse_debug_attribute(attr: &Attribute) -> Result<Option<String>, Box<dyn std::error::Error>> {
     if !attr.path.is_ident("debug") {
@@ -32,10 +32,22 @@ fn parse_field(field: &Field) -> Option<(syn::Ident, syn::Type, Option<String>)>
         .map(|ident| (ident, field.ty.clone(), custom_format))
 }
 
+fn add_trait_bounds(mut generics: Generics) -> Generics {
+    for param in &mut generics.params {
+        if let GenericParam::Type(ref mut type_param) = *param {
+            type_param.bounds.push(parse_quote!(std::fmt::Debug));
+        }
+    }
+    generics
+}
+
 #[proc_macro_derive(CustomDebug, attributes(debug))]
 pub fn derive(input: TokenStream) -> TokenStream {
     let input = parse_macro_input!(input as DeriveInput);
     let ident = &input.ident;
+    let generics = add_trait_bounds(input.generics);
+    let (impl_generics, ty_generics, where_clause) = generics.split_for_impl();
+
     if let syn::Data::Struct(syn::DataStruct {
         fields: syn::Fields::Named(syn::FieldsNamed { named, .. }),
         ..
@@ -63,7 +75,7 @@ pub fn derive(input: TokenStream) -> TokenStream {
             .unzip();
 
         let expanded = quote! {
-            impl std::fmt::Debug for #ident {
+            impl #impl_generics std::fmt::Debug for #ident #ty_generics #where_clause {
                 fn fmt(&self, fmt: &mut std::fmt::Formatter) -> std::fmt::Result {
                     fmt.debug_struct(stringify!(#ident))
                         #(
