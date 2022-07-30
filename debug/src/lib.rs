@@ -2,7 +2,7 @@ use proc_macro::TokenStream;
 use quote::quote;
 use syn::{
     parse_macro_input, parse_quote, Attribute, DeriveInput, Field, GenericParam, Generics, Ident,
-    Path, Type,
+    Path, Type, TypeParam,
 };
 
 type ParsedField = (syn::Ident, syn::Type, Option<String>);
@@ -37,7 +37,7 @@ fn parse_field(field: &Field) -> Option<ParsedField> {
 }
 
 enum ParsedType {
-    GenericType(String),
+    GenericType(String, Type),
     Other,
 }
 
@@ -65,8 +65,8 @@ fn parse_path(path: &Path) -> Option<(&Ident, &Type)> {
 fn parse_type(ty: &Type) -> ParsedType {
     match ty {
         Type::Path(syn::TypePath { path, .. }) => {
-            if let Some((ident, _)) = parse_path(path) {
-                ParsedType::GenericType(ident.to_string())
+            if let Some((ident, ty)) = parse_path(path) {
+                ParsedType::GenericType(ident.to_string(), ty.clone())
             } else {
                 ParsedType::Other
             }
@@ -102,9 +102,25 @@ fn extract_type_params_from_type(ty: &Type) -> Vec<String> {
     }
 }
 
+fn is_associated_type(ty: &Type, type_param: &TypeParam) -> bool {
+    match ty {
+        Type::Path(syn::TypePath { path, .. }) => {
+            if let Some(first_segment) = path.segments.first() {
+                first_segment.ident == type_param.ident && path.segments.len() >= 2
+            } else {
+                false
+            }
+        }
+        _ => false,
+    }
+}
+
 fn add_trait_bounds(mut generics: Generics, parsed_fields: &[ParsedField]) -> Generics {
     // struct Field<T>
     // T -> T: std::fmt::Debug
+    let mut associated_types: Vec<Type> = vec![];
+    let mut phantom_data_idents: Vec<&Ident> = vec![];
+
     for param in &mut generics.params {
         if let GenericParam::Type(ref mut type_param) = *param {
             let type_param_name = type_param.ident.to_string();
@@ -115,20 +131,50 @@ fn add_trait_bounds(mut generics: Generics, parsed_fields: &[ParsedField]) -> Ge
                     type_params.contains(&type_param_name)
                 })
                 .all(|(_, ty, _)| match parse_type(ty) {
-                    ParsedType::GenericType(ty_name) => ty_name == "PhantomData",
+                    ParsedType::GenericType(ty_name, _) => ty_name == "PhantomData",
                     _ => false,
                 });
 
             if is_phantom_data {
                 // where PhantomData<T>: std::fmt::Debug
                 let type_param_ident = &type_param.ident;
-                generics.where_clause =
-                    parse_quote!(where PhantomData<#type_param_ident>: std::fmt::Debug);
+                phantom_data_idents.push(type_param_ident)
             } else {
-                type_param.bounds.push(parse_quote!(std::fmt::Debug));
+                let found_associated_types = parsed_fields
+                    .iter()
+                    .cloned()
+                    .filter(|(_, ty, _)| match parse_type(ty) {
+                        ParsedType::GenericType(_, inner_ty) => {
+                            is_associated_type(&inner_ty, type_param)
+                        }
+                        _ => is_associated_type(ty, type_param),
+                    })
+                    .map(|(_, ty, _)| match parse_type(&ty) {
+                        ParsedType::GenericType(_, inner_ty) => inner_ty,
+                        _ => ty,
+                    })
+                    .collect::<Vec<_>>();
+
+                if let Some(associated_type) = found_associated_types.first() {
+                    associated_types.push(associated_type.clone());
+                } else {
+                    type_param.bounds.push(parse_quote!(std::fmt::Debug));
+                }
             }
         }
     }
+
+    generics.where_clause = parse_quote!(
+        where
+            #(
+                PhantomData<#phantom_data_idents>: std::fmt::Debug,
+            )*
+            #(
+                #associated_types: std::fmt::Debug,
+            )*
+
+    );
+
     generics
 }
 
@@ -185,7 +231,7 @@ pub fn derive(input: TokenStream) -> TokenStream {
                 }
             }
         };
-        // println!("{}", expanded.to_string());
+        eprintln!("{}", expanded.to_string());
         expanded.into()
     } else {
         TokenStream::new()
