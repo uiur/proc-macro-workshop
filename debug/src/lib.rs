@@ -1,8 +1,8 @@
 use proc_macro::TokenStream;
 use quote::quote;
 use syn::{
-    parse_macro_input, parse_quote, Attribute, DeriveInput, Field, GenericParam, Generics, Ident,
-    Path, Type, TypeParam,
+    parse_macro_input, parse_quote, token::Where, Attribute, DeriveInput, Field, GenericParam,
+    Generics, Ident, LitStr, MetaNameValue, Path, Type, TypeParam, WherePredicate,
 };
 
 type ParsedField = (syn::Ident, syn::Type, Option<String>);
@@ -115,7 +115,11 @@ fn is_associated_type(ty: &Type, type_param: &TypeParam) -> bool {
     }
 }
 
-fn add_trait_bounds(mut generics: Generics, parsed_fields: &[ParsedField]) -> Generics {
+fn add_trait_bounds(
+    mut generics: Generics,
+    parsed_fields: &[ParsedField],
+    bounds: &Vec<WherePredicate>,
+) -> Generics {
     // struct Field<T>
     // T -> T: std::fmt::Debug
     let mut associated_types: Vec<Type> = vec![];
@@ -157,7 +161,7 @@ fn add_trait_bounds(mut generics: Generics, parsed_fields: &[ParsedField]) -> Ge
 
                 if let Some(associated_type) = found_associated_types.first() {
                     associated_types.push(associated_type.clone());
-                } else {
+                } else if bounds.is_empty() {
                     type_param.bounds.push(parse_quote!(std::fmt::Debug));
                 }
             }
@@ -172,16 +176,59 @@ fn add_trait_bounds(mut generics: Generics, parsed_fields: &[ParsedField]) -> Ge
             #(
                 #associated_types: std::fmt::Debug,
             )*
+            #(
+                #bounds,
+            )*
 
     );
 
     generics
 }
 
+fn extract_custom_bounds(input: &DeriveInput) -> Vec<WherePredicate> {
+    let bound_strs: Vec<_> = input
+        .attrs
+        .iter()
+        .filter_map(|attr| {
+            if attr.path.is_ident("debug") {
+                match attr.parse_meta().ok()? {
+                    syn::Meta::List(syn::MetaList { nested, .. }) => {
+                        nested.iter().find_map(|meta| match meta {
+                            syn::NestedMeta::Meta(syn::Meta::NameValue(MetaNameValue {
+                                path,
+                                lit: syn::Lit::Str(lit_str),
+                                ..
+                            })) => {
+                                if path.is_ident("bound") {
+                                    Some(lit_str.value())
+                                } else {
+                                    None
+                                }
+                            }
+                            _ => None,
+                        })
+                    }
+                    _ => None,
+                }
+            } else {
+                None
+            }
+        })
+        .collect();
+
+    let predicates: Vec<_> = bound_strs
+        .iter()
+        .filter_map(|bound_str| syn::parse_str::<WherePredicate>(bound_str).ok())
+        .collect();
+
+    predicates
+}
+
 #[proc_macro_derive(CustomDebug, attributes(debug))]
 pub fn derive(input: TokenStream) -> TokenStream {
     let input = parse_macro_input!(input as DeriveInput);
     let ident = &input.ident;
+    let attr_bounds: Vec<WherePredicate> = extract_custom_bounds(&input);
 
     if let syn::Data::Struct(syn::DataStruct {
         fields: syn::Fields::Named(syn::FieldsNamed { named, .. }),
@@ -194,7 +241,7 @@ pub fn derive(input: TokenStream) -> TokenStream {
             .filter_map(|field| parse_field(&field))
             .collect();
 
-        let generics = add_trait_bounds(input.generics, &all_parsed_fields);
+        let generics = add_trait_bounds(input.generics, &all_parsed_fields, &attr_bounds);
         let (impl_generics, ty_generics, where_clause) = generics.split_for_impl();
 
         let (parsed_fields_with_custom_format, parsed_fields): (Vec<_>, Vec<_>) = all_parsed_fields

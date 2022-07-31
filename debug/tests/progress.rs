@@ -9,5 +9,19 @@ fn tests() {
     t.pass("tests/05-phantom-data.rs");
     t.pass("tests/06-bound-trouble.rs");
     t.pass("tests/07-associated-type.rs");
-    //t.pass("tests/08-escape-hatch.rs");
+    t.pass("tests/08-escape-hatch.rs");
+}
+pub trait Trait {
+    type Value;
+}
+
+#[derive(CustomDebug)]
+#[debug(bound = "T::Value: std::fmt::Debug")]
+pub struct Wrapper<T: Trait> {
+    field: Field<T>,
+}
+
+#[derive(CustomDebug)]
+struct Field<T: Trait> {
+    values: Vec<T::Value>,
 }
